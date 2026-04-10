@@ -1,0 +1,164 @@
+import requests
+import discord
+from discord.ext import commands, tasks
+
+# --- CONFIG ---
+TOKEN = "YOUR_DISCORD_BOT_TOKEN"
+PREFIX = "!"
+
+DEFAULT_SERVER = "x1"
+ALERT_CHANNEL_ID = 0
+ROLE_ID = 0
+
+SPIKE_AMOUNT = 4
+WIPE_THRESHOLD = 2
+
+server_map = {
+    "x1": "BM_ID_1",
+    "x2": "BM_ID_2",
+    "x3": "BM_ID_3",
+    "x4": "BM_ID_4",
+    "x5": "BM_ID_5",
+}
+
+enemy_servers = ["x3", "x4", "x5"]
+
+# --- BOT SETUP ---
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix=PREFIX, intents=intents)
+
+last_player_count = None
+wipe_alerted = {}
+
+# --- API FUNCTION ---
+def get_bm_players(server_id):
+    if server_id not in server_map:
+        return None
+
+    bm_id = server_map[server_id]
+    url = f"https://api.battlemetrics.com/servers/{bm_id}"
+
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+
+        data = response.json()
+        name = data["data"]["attributes"]["name"]
+        players = data["data"]["attributes"]["players"]
+        max_players = data["data"]["attributes"]["maxPlayers"]
+        return name, players, max_players
+
+    except requests.exceptions.RequestException as e:
+        print(f"API request failed for {server_id}: {e}")
+        return None
+
+# --- EVENTS ---
+@bot.event
+async def on_ready():
+    print(f"Bot is online as {bot.user}")
+
+    if not monitor_population.is_running():
+        monitor_population.start()
+
+    if not monitor_enemy_low_pop.is_running():
+        monitor_enemy_low_pop.start()
+
+@bot.event
+async def on_message(message):
+    if message.author == bot.user:
+        return
+    await bot.process_commands(message)
+
+# --- COMMANDS ---
+@bot.command()
+async def pop(ctx):
+    result = get_bm_players(DEFAULT_SERVER)
+
+    if result is None:
+        await ctx.send("Server not found or API failed.")
+        return
+
+    name, players, max_players = result
+    await ctx.send(f"{name} -> {players}/{max_players} players online")
+
+@bot.command()
+async def check(ctx, server_id: str):
+    result = get_bm_players(server_id)
+
+    if result is None:
+        await ctx.send("Server not found or API failed.")
+        return
+
+    name, players, max_players = result
+    await ctx.send(f"{name} -> {players}/{max_players} players online")
+
+@bot.command()
+async def testalert(ctx):
+    channel = bot.get_channel(ALERT_CHANNEL_ID)
+
+    if channel:
+        await channel.send("TEST ALERT WORKING")
+    else:
+        await ctx.send("Channel not found")
+
+# --- MAIN SERVER SPIKE MONITOR ---
+@tasks.loop(minutes=16)
+async def monitor_population():
+    global last_player_count
+
+    result = get_bm_players(DEFAULT_SERVER)
+
+    if result is None:
+        print("Skipping main server check because API failed.")
+        return
+
+    name, players, max_players = result
+
+    if last_player_count is None:
+        last_player_count = players
+        print(f"Baseline set: {players}")
+        return
+
+    difference = players - last_player_count
+    print(f"[MAIN] {name} -> {players}/{max_players} (diff: {difference})")
+
+    if difference >= SPIKE_AMOUNT:
+        channel = bot.get_channel(ALERT_CHANNEL_ID)
+        if channel:
+            await channel.send(
+                f"SPIKE ALERT: {name} +{difference} players ({last_player_count} -> {players})"
+            )
+
+    last_player_count = players
+
+# --- ENEMY LOW POP MONITOR ---
+@tasks.loop(minutes=25)
+async def monitor_enemy_low_pop():
+    channel = bot.get_channel(ALERT_CHANNEL_ID)
+
+    for server_id in enemy_servers:
+        result = get_bm_players(server_id)
+
+        if result is None:
+            print(f"[ENEMY] Skipping {server_id}")
+            continue
+
+        name, players, max_players = result
+        print(f"[ENEMY] {name} -> {players}/{max_players}")
+
+        if server_id not in wipe_alerted:
+            wipe_alerted[server_id] = False
+
+        if players <= WIPE_THRESHOLD and not wipe_alerted[server_id]:
+            if channel:
+                await channel.send(
+                    f"<@&{ROLE_ID}> WIPE WINDOW: {name} is at {players}/{max_players}"
+                )
+            wipe_alerted[server_id] = True
+
+        elif players > WIPE_THRESHOLD:
+            wipe_alerted[server_id] = False
+
+# --- RUN ---
+bot.run(TOKEN)
