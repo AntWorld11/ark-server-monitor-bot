@@ -27,4 +27,4 @@ Built to automate server monitoring and demonstrate real-time alerting, API inte
 
 ## Note
 
-This is a sanitized version of the bot. Sensitive information such as tokens and IDs have been removed for security.
+This is a edited version of the bot. Sensitive information such as tokens and IDs have been removed for security.
